@@ -8,13 +8,15 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	tm "github.com/buger/goterm"
 	kb "github.com/eiannone/keyboard"
+	rest "k8s.io/client-go/rest"
 )
 
 type KeyboardInput int
@@ -22,6 +24,7 @@ type KeyboardInput int
 const (
 	Pod       KeyboardInput = 0
 	Sts       KeyboardInput = 1
+	Crds      KeyboardInput = 5
 	ArrowUp   KeyboardInput = 2
 	ArrowDown KeyboardInput = 3
 	Delete    KeyboardInput = 4
@@ -49,7 +52,7 @@ func main() {
 		case modifier := <-inputChan:
 			closeChan <- true
 			switch modifier {
-			case Pod, Sts:
+			case Pod, Sts, Crds:
 				val = int(modifier)
 				line = 0
 			case ArrowUp:
@@ -84,6 +87,12 @@ func listPodNamespaced(clientset *kubernetes.Clientset, namespace string) []core
 	return pods.Items
 }
 
+func listCRDs(clientset *kubernetes.Clientset, config *rest.Config) []apiextensionsv1beta1.CustomResourceDefinition {
+	apiextensionsClientSet, _ := apiextensionsclientset.NewForConfig(config)
+	list, _ := apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().List(context.TODO(), metav1.ListOptions{})
+	return list.Items
+}
+
 func deleteResource(clientset *kubernetes.Clientset, line int, val int) {
 	switch KeyboardInput(val) {
 	case Pod:
@@ -107,9 +116,36 @@ func showData(config *rest.Config, clientset *kubernetes.Clientset, what int, li
 				readAndPrintPods(config, clientset, line)
 			case 1:
 				readAndPrintSts(config, clientset, line)
+			case 5:
+				readAndPrintCrds(config, clientset, line)
 			}
 		}
 	}
+}
+
+func readAndPrintCrds(config *rest.Config, clientset *kubernetes.Clientset, line int) {
+	list := listCRDs(clientset, config)
+	tm.Clear()
+	tm.MoveCursor(1, 1)
+	if line < 0 {
+		line = 0
+	}
+	if line >= len(list) {
+		line = len(list) - 1
+	}
+	for i, crd := range list {
+		if i == line {
+			tm.Printf(tm.Background(tm.Color(fmt.Sprintf("CRD: %+v\t%s\n\n", crd.Name, crd.Kind), tm.RED), tm.GREEN))
+			tm.Println()
+		} else {
+			tm.Printf("CRD: %+v\t%s\n\n", crd.Name, crd.Kind)
+		}
+	}
+
+	tm.Flush() // Call it every time at the end of rendering
+
+	time.Sleep(time.Millisecond * 200)
+
 }
 
 func readAndPrintSts(config *rest.Config, clientset *kubernetes.Clientset, line int) {
@@ -174,6 +210,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- Pod
 		case '1':
 			inputChan <- Sts
+		case '2':
+			inputChan <- Crds
 		case 'q', 'Q':
 			inputChan <- Quit
 		case 'd', 'D':
