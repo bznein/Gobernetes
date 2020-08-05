@@ -60,7 +60,7 @@ func main() {
 			case ArrowDown:
 				line++
 			case Delete:
-				deleteResource(clientset, line, val)
+				deleteResource(config, line, val)
 				line = 0
 			case Quit:
 				return
@@ -93,7 +93,11 @@ func listCRDs(clientset *kubernetes.Clientset, config *rest.Config) []apiextensi
 	return list.Items
 }
 
-func deleteResource(clientset *kubernetes.Clientset, line int, val int) {
+func deleteResource(config *rest.Config, line int, val int) {
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %+v", err)
+	}
 	switch KeyboardInput(val) {
 	case Pod:
 		pod := listPodNamespaced(clientset, "nikolas")[line]
@@ -101,6 +105,11 @@ func deleteResource(clientset *kubernetes.Clientset, line int, val int) {
 	case Sts:
 		sts := listStsNamespaced(clientset, "nikolas")[line]
 		clientset.AppsV1().StatefulSets(sts.Namespace).Delete(context.TODO(), sts.Name, metav1.DeleteOptions{})
+	case Crds:
+		crd := listCRDs(clientset, config)[line]
+		apiextensionsClientSet, _ := apiextensionsclientset.NewForConfig(config)
+		apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(context.TODO(), crd.Name, metav1.DeleteOptions{})
+
 	}
 }
 
