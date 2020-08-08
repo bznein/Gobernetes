@@ -22,14 +22,19 @@ import (
 type KeyboardInput int
 
 const (
-	Pod       KeyboardInput = 0
-	Sts       KeyboardInput = 1
-	Crds      KeyboardInput = 5
-	ArrowUp   KeyboardInput = 2
-	ArrowDown KeyboardInput = 3
-	Delete    KeyboardInput = 4
-	Quit      KeyboardInput = -1
+	Pod        KeyboardInput = 0
+	Sts        KeyboardInput = 1
+	Crds       KeyboardInput = 5
+	Namespaces KeyboardInput = 6
+	ArrowUp    KeyboardInput = 2
+	ArrowDown  KeyboardInput = 3
+	Delete     KeyboardInput = 4
+	Select     KeyboardInput = 7
+	Quit       KeyboardInput = -1
 )
+
+var namespace string = "default"
+var sleep time.Duration = 50
 
 func main() {
 	config, err := clientcmd.BuildConfigFromFlags("", "/Users/nikolas.de-giorgis/.kube/kind")
@@ -45,33 +50,42 @@ func main() {
 	closeChan := make(chan bool)
 	go showData(config, clientset, 0, 0, closeChan)
 	go waitForInput(inputChan)
-	val := 0
 	line := 0
+	lastWhat := Pod
 	for {
 		select {
 		case modifier := <-inputChan:
 			closeChan <- true
 			switch modifier {
-			case Pod, Sts, Crds:
-				val = int(modifier)
+			case Pod, Sts, Crds, Namespaces:
 				line = 0
+				lastWhat = modifier
 			case ArrowUp:
 				line--
 			case ArrowDown:
 				line++
 			case Delete:
-				deleteResource(config, line, val)
+				deleteResource(config, line, lastWhat)
 				line = 0
+			case Select:
+				selectResource(config, line, lastWhat)
 			case Quit:
 				return
 			}
-			go showData(config, clientset, val, line, closeChan)
+			go showData(config, clientset, lastWhat, line, closeChan)
 			go waitForInput(inputChan)
 		}
 	}
 }
 
-func listStsNamespaced(clientset *kubernetes.Clientset, namespace string) []appsv1.StatefulSet {
+func listNamespaces(clientset *kubernetes.Clientset) []corev1.Namespace {
+	ns, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %+v", err)
+	}
+	return ns.Items
+}
+func listStsNamespaced(clientset *kubernetes.Clientset) []appsv1.StatefulSet {
 	sts, err := clientset.AppsV1().StatefulSets(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %+v", err)
@@ -79,7 +93,7 @@ func listStsNamespaced(clientset *kubernetes.Clientset, namespace string) []apps
 	return sts.Items
 }
 
-func listPodNamespaced(clientset *kubernetes.Clientset, namespace string) []corev1.Pod {
+func listPodNamespaced(clientset *kubernetes.Clientset) []corev1.Pod {
 	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %+v", err)
@@ -93,40 +107,58 @@ func listCRDs(clientset *kubernetes.Clientset, config *rest.Config) []apiextensi
 	return list.Items
 }
 
-func deleteResource(config *rest.Config, line int, val int) {
+func deleteResource(config *rest.Config, line int, val KeyboardInput) {
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %+v", err)
 	}
-	switch KeyboardInput(val) {
+	switch val {
 	case Pod:
-		pod := listPodNamespaced(clientset, "nikolas")[line]
+		pod := listPodNamespaced(clientset)[line]
 		clientset.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 	case Sts:
-		sts := listStsNamespaced(clientset, "nikolas")[line]
+		sts := listStsNamespaced(clientset)[line]
 		clientset.AppsV1().StatefulSets(sts.Namespace).Delete(context.TODO(), sts.Name, metav1.DeleteOptions{})
 	case Crds:
 		crd := listCRDs(clientset, config)[line]
 		apiextensionsClientSet, _ := apiextensionsclientset.NewForConfig(config)
 		apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(context.TODO(), crd.Name, metav1.DeleteOptions{})
+	case Namespaces:
+		ns := listNamespaces(clientset)[line]
+		clientset.CoreV1().Namespaces().Delete(context.TODO(), ns.Name, metav1.DeleteOptions{})
 
 	}
 }
 
-func showData(config *rest.Config, clientset *kubernetes.Clientset, what int, line int, closeChan chan bool) {
+func selectResource(config *rest.Config, line int, val KeyboardInput) {
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %+v", err)
+	}
 
+	switch val {
+	// TODO NIKOLAS implement for other reources
+	case Namespaces:
+		ns := listNamespaces(clientset)[line]
+		namespace = ns.Name
+	}
+}
+
+func showData(config *rest.Config, clientset *kubernetes.Clientset, what KeyboardInput, line int, closeChan chan bool) {
 	for {
 		select {
 		case <-closeChan:
 			return
 		default:
 			switch what {
-			case 0:
+			case Pod:
 				readAndPrintPods(config, clientset, line)
-			case 1:
+			case Sts:
 				readAndPrintSts(config, clientset, line)
-			case 5:
+			case Crds:
 				readAndPrintCrds(config, clientset, line)
+			case Namespaces:
+				readAndPrintNamespaces(config, clientset, line)
 			}
 		}
 	}
@@ -153,12 +185,12 @@ func readAndPrintCrds(config *rest.Config, clientset *kubernetes.Clientset, line
 
 	tm.Flush() // Call it every time at the end of rendering
 
-	time.Sleep(time.Millisecond * 200)
+	time.Sleep(time.Millisecond * sleep)
 
 }
 
 func readAndPrintSts(config *rest.Config, clientset *kubernetes.Clientset, line int) {
-	sts := listStsNamespaced(clientset, "nikolas")
+	sts := listStsNamespaced(clientset)
 	tm.Clear()
 	tm.MoveCursor(1, 1)
 	if line < 0 {
@@ -178,12 +210,37 @@ func readAndPrintSts(config *rest.Config, clientset *kubernetes.Clientset, line 
 
 	tm.Flush() // Call it every time at the end of rendering
 
-	time.Sleep(time.Millisecond * 200)
+	time.Sleep(time.Millisecond * sleep)
+
+}
+
+func readAndPrintNamespaces(config *rest.Config, clientset *kubernetes.Clientset, line int) {
+	ns := listNamespaces(clientset)
+	tm.Clear()
+	tm.MoveCursor(1, 1)
+	if line < 0 {
+		line = 0
+	}
+	if line >= len(ns) {
+		line = len(ns) - 1
+	}
+	for i, namespace := range ns {
+		if i == line {
+			tm.Printf(tm.Background(tm.Color(fmt.Sprintf("Namespace: %+v\t%s\n\n", namespace.Name, namespace.Kind), tm.RED), tm.GREEN))
+			tm.Println()
+		} else {
+			tm.Printf("Namespace: %+v\t%s\n\n", namespace.Name, namespace.Kind)
+		}
+	}
+
+	tm.Flush() // Call it every time at the end of rendering
+
+	time.Sleep(time.Millisecond * sleep)
 
 }
 
 func readAndPrintPods(config *rest.Config, clientset *kubernetes.Clientset, line int) {
-	pods := listPodNamespaced(clientset, "nikolas")
+	pods := listPodNamespaced(clientset)
 	tm.Clear()
 	tm.MoveCursor(1, 1)
 	if line < 0 {
@@ -204,7 +261,7 @@ func readAndPrintPods(config *rest.Config, clientset *kubernetes.Clientset, line
 
 	tm.Flush() // Call it every time at the end of rendering
 
-	time.Sleep(time.Millisecond * 200)
+	time.Sleep(time.Millisecond * sleep)
 
 }
 
@@ -221,6 +278,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- Sts
 		case '2':
 			inputChan <- Crds
+		case '3':
+			inputChan <- Namespaces
 		case 'q', 'Q':
 			inputChan <- Quit
 		case 'd', 'D':
@@ -232,6 +291,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- ArrowUp
 		case kb.KeyArrowDown:
 			inputChan <- ArrowDown
+		case kb.KeyEnter:
+			inputChan <- Select
 		}
 	}
 
