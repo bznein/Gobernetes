@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +32,7 @@ const (
 	ArrowDown  KeyboardInput = 3
 	Delete     KeyboardInput = 4
 	Select     KeyboardInput = 7
+	Logs       KeyboardInput = 8
 	Quit       KeyboardInput = -1
 )
 
@@ -37,6 +40,7 @@ var namespace string = "default"
 var sleep time.Duration = 50
 
 func main() {
+
 	config, err := clientcmd.BuildConfigFromFlags("", "/Users/nikolas.de-giorgis/.kube/kind")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %+v", err)
@@ -69,11 +73,37 @@ func main() {
 				line = 0
 			case Select:
 				selectResource(config, line, lastWhat)
+			case Logs:
+				if lastWhat == Pod {
+					waitChan := make(chan bool)
+					go showLogs(clientset, config, line, closeChan, waitChan)
+					<-waitChan
+				}
 			case Quit:
 				return
 			}
 			go showData(config, clientset, lastWhat, line, closeChan)
 			go waitForInput(inputChan)
+		}
+	}
+}
+
+func showLogs(clientset *kubernetes.Clientset, config *rest.Config, line int, closeChan chan bool, waitChan chan bool) {
+	for {
+		select {
+		case <-closeChan:
+			waitChan <- true
+			return
+		default:
+			log := getLogs(config, line, Pod)
+			tm.Clear()
+			tm.MoveCursor(1, 1)
+			tm.Print(log)
+
+			tm.Flush() // Call it every time at the end of rendering
+
+			time.Sleep(time.Millisecond * sleep * 3)
+
 		}
 	}
 }
@@ -142,6 +172,21 @@ func selectResource(config *rest.Config, line int, val KeyboardInput) {
 		ns := listNamespaces(clientset)[line]
 		namespace = ns.Name
 	}
+}
+
+func getLogs(config *rest.Config, line int, val KeyboardInput) string {
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %+v", err)
+	}
+	if val == Pod {
+		pod := listPodNamespaced(clientset)[line]
+		log, _ := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.TODO())
+		buf := new(strings.Builder)
+		io.Copy(buf, log)
+		return buf.String()
+	}
+	return ""
 }
 
 func showData(config *rest.Config, clientset *kubernetes.Clientset, what KeyboardInput, line int, closeChan chan bool) {
@@ -284,6 +329,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- Quit
 		case 'd', 'D':
 			inputChan <- Delete
+		case 'l', 'L':
+			inputChan <- Logs
 		}
 	} else {
 		switch key {
