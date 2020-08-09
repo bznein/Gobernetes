@@ -33,6 +33,7 @@ const (
 	Delete     KeyboardInput = 4
 	Select     KeyboardInput = 7
 	Logs       KeyboardInput = 8
+	Save       KeyboardInput = 9
 	Quit       KeyboardInput = -1
 )
 
@@ -59,7 +60,10 @@ func main() {
 	for {
 		select {
 		case modifier := <-inputChan:
-			closeChan <- true
+			if modifier != Save {
+				fmt.Fprintf(os.Stderr, "Sending closechan\n")
+				closeChan <- true
+			}
 			switch modifier {
 			case Pod, Sts, Crds, Namespaces:
 				line = 0
@@ -73,39 +77,58 @@ func main() {
 				line = 0
 			case Select:
 				selectResource(config, line, lastWhat)
-			case Logs:
+			case Logs, Save:
 				if lastWhat == Pod {
-					waitChan := make(chan bool)
-					go showLogs(clientset, config, line, closeChan, waitChan)
-					<-waitChan
+					if modifier == Logs {
+						go showLogs(clientset, config, line, closeChan)
+						go waitForInput(inputChan)
+					} else {
+						saveLogs(clientset, config, line)
+						go waitForInput(inputChan)
+					}
 				}
 			case Quit:
 				return
 			}
-			go showData(config, clientset, lastWhat, line, closeChan)
-			go waitForInput(inputChan)
+			if modifier != Logs && modifier != Save {
+				go showData(config, clientset, lastWhat, line, closeChan)
+				go waitForInput(inputChan)
+			}
 		}
 	}
 }
 
-func showLogs(clientset *kubernetes.Clientset, config *rest.Config, line int, closeChan chan bool, waitChan chan bool) {
+func showLogs(clientset *kubernetes.Clientset, config *rest.Config, line int, closeChan chan bool) {
+	tm.Clear()
+	tm.MoveCursor(1, 1)
+	tm.Flush()
+	lastLog := ""
 	for {
 		select {
 		case <-closeChan:
-			waitChan <- true
 			return
 		default:
 			log := getLogs(config, line, Pod)
-			tm.Clear()
-			tm.MoveCursor(1, 1)
-			tm.Print(log)
-
-			tm.Flush() // Call it every time at the end of rendering
+			if log == "" {
+				continue
+			}
+			addition := strings.Replace(log, lastLog, "", 1)
+			fmt.Print(addition)
+			lastLog = log
 
 			time.Sleep(time.Millisecond * sleep * 3)
 
 		}
 	}
+}
+
+func saveLogs(clientset *kubernetes.Clientset, config *rest.Config, line int) {
+	fmt.Fprintf(os.Stderr, "Saving logs\n")
+	podName := listPodNamespaced(clientset)[line].Name
+	log := getLogs(config, line, Pod)
+	f, _ := os.Create("./" + podName + "-" + time.Now().Format("2006-01-02T15:04:05") + ".log")
+	f.WriteString(log)
+	f.Close()
 }
 
 func listNamespaces(clientset *kubernetes.Clientset) []corev1.Namespace {
@@ -182,7 +205,10 @@ func getLogs(config *rest.Config, line int, val KeyboardInput) string {
 	if val == Pod {
 		pod := listPodNamespaced(clientset)[line]
 		log, _ := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.TODO())
-		buf := new(strings.Builder)
+		if err != nil || log == nil {
+			return ""
+		}
+		buf := &strings.Builder{}
 		io.Copy(buf, log)
 		return buf.String()
 	}
@@ -193,6 +219,7 @@ func showData(config *rest.Config, clientset *kubernetes.Clientset, what Keyboar
 	for {
 		select {
 		case <-closeChan:
+			fmt.Fprintf(os.Stderr, "Receiving closechan\n")
 			return
 		default:
 			switch what {
@@ -331,6 +358,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- Delete
 		case 'l', 'L':
 			inputChan <- Logs
+		case 's', 'S':
+			inputChan <- Save
 		}
 	} else {
 		switch key {
