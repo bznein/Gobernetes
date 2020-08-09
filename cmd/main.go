@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	describe "k8s.io/kubectl/pkg/describe"
 
 	tm "github.com/buger/goterm"
 	kb "github.com/eiannone/keyboard"
@@ -34,11 +35,29 @@ const (
 	Select     KeyboardInput = 7
 	Logs       KeyboardInput = 8
 	Save       KeyboardInput = 9
+	Describe   KeyboardInput = 10
 	Quit       KeyboardInput = -1
 )
 
 var namespace string = "default"
 var sleep time.Duration = 50
+
+func closesChan(mod KeyboardInput) bool {
+	switch mod {
+	case Save:
+		return false
+	default:
+		return true
+	}
+}
+
+func showsData(what KeyboardInput) bool {
+	switch what {
+	case Logs, Save, Describe:
+		return false
+	}
+	return true
+}
 
 func main() {
 
@@ -60,8 +79,7 @@ func main() {
 	for {
 		select {
 		case modifier := <-inputChan:
-			if modifier != Save {
-				fmt.Fprintf(os.Stderr, "Sending closechan\n")
+			if closesChan(modifier) {
 				closeChan <- true
 			}
 			switch modifier {
@@ -79,23 +97,55 @@ func main() {
 				selectResource(config, line, lastWhat)
 			case Logs, Save:
 				if lastWhat == Pod {
-					if modifier == Logs {
+					switch modifier {
+					case Logs:
 						go showLogs(clientset, config, line, closeChan)
 						go waitForInput(inputChan)
-					} else {
+					case Save:
 						saveLogs(clientset, config, line)
 						go waitForInput(inputChan)
 					}
 				}
+			case Describe:
+				go describeResource(clientset, config, line, lastWhat, closeChan)
+				go waitForInput(inputChan)
 			case Quit:
 				return
 			}
-			if modifier != Logs && modifier != Save {
+			if showsData(modifier) {
 				go showData(config, clientset, lastWhat, line, closeChan)
 				go waitForInput(inputChan)
 			}
 		}
 	}
+}
+
+func describeResource(clientset *kubernetes.Clientset, config *rest.Config, line int, what KeyboardInput, closeChan chan bool) {
+	tm.Clear()
+	tm.MoveCursor(1, 1)
+	tm.Flush()
+	var val string
+	switch what {
+	case Pod:
+		podName := listPodNamespaced(clientset)[line].Name
+		describer := describe.PodDescriber{clientset}
+		fmt.Fprintf(os.Stderr, "Podname: %s\n\nnamespace: %s\n\n", podName, namespace)
+		val, _ = describer.Describe(namespace, podName, describe.DescriberSettings{})
+	case Sts:
+		stsName := listStsNamespaced(clientset)[line].Name
+		describer := describe.StatefulSetDescriber{}
+		val, _ = describer.Describe(namespace, stsName, describe.DescriberSettings{})
+	// case Crds:
+	// stsName := listCRDs(clientset, config)[line].Name
+	// describer := describe.resource
+	// val, _ = describer.Describe(namespace, stsName, describe.DescriberSettings{})
+	case Namespaces:
+		ns := listNamespaces(clientset)[line].Name
+		describer := describe.NamespaceDescriber{clientset}
+		val, _ = describer.Describe(namespace, ns, describe.DescriberSettings{})
+	}
+	fmt.Print(val)
+	<-closeChan
 }
 
 func showLogs(clientset *kubernetes.Clientset, config *rest.Config, line int, closeChan chan bool) {
@@ -123,7 +173,6 @@ func showLogs(clientset *kubernetes.Clientset, config *rest.Config, line int, cl
 }
 
 func saveLogs(clientset *kubernetes.Clientset, config *rest.Config, line int) {
-	fmt.Fprintf(os.Stderr, "Saving logs\n")
 	podName := listPodNamespaced(clientset)[line].Name
 	log := getLogs(config, line, Pod)
 	f, _ := os.Create("./" + podName + "-" + time.Now().Format("2006-01-02T15:04:05") + ".log")
@@ -360,6 +409,8 @@ func waitForInput(inputChan chan KeyboardInput) {
 			inputChan <- Logs
 		case 's', 'S':
 			inputChan <- Save
+		case 'g', 'G':
+			inputChan <- Describe
 		}
 	} else {
 		switch key {
